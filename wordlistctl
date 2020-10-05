@@ -1,0 +1,59 @@
+#!/bin/sh
+#
+# AUTHOR
+# Valerio Casalino <casalinovalerio.cv@gmail.com>
+#
+# DESCRIPTION
+# wordlistctl - Fetch, install and search wordlist archives from websites.
+# Script to fetch, install, update and search wordlist archives from websites
+# offering wordlists with more than 6300 wordlists available.
+#
+# LICENSE
+# GPLv3, this is a derived work from the Black Arch team, more specifically,
+# as stated in the main document, from sepehrdad@blackarch.org
+# ====> https://github.com/BlackArch/wordlistctl
+
+### Global variables
+_WORDLIST_PATH="/usr/share/wordlists"
+_ARCHIVE="$_WORDLIST_PATH/archive.json"
+_NEEDED_PKGS="base64 curl jq"
+
+### Output functions
+errmsg() { printf "\e[31m==>\e[0m %s\\n" "$1"; }
+insmsg() { printf "\e[32m==>\e[0m %s\\n" "$1"; }
+warmsg() { printf "\e[33m==>\e[0m %s\\n" "$1"; }
+
+### Checks
+# Check if packages are installed in the system
+are_installed() { 
+    command -v $@ >/dev/null \
+        || { errmsg "Please, install base64"; return 1; }
+}
+# Check if an internet connection is avaliable
+pc_connected() { 
+    ping -c 1 "8.8.8.8" >/dev/null \
+        || { errmsg "An internet connection is necessary"; return 1; }
+}
+is_root() {
+    [ "$USER" = "root" ] || { errmsg "Run as root please"; return 1; }
+}
+get_archive() {
+    curl -sSLf ""
+}
+
+### Actual script
+is_root || exit 1
+
+if [ ! -f "$_ARCHIVE" ]; then
+    warmsg "Running basic checks..."
+    are_installed $_NEEDED_PKGS && pc_connected || exit 1
+    get_archive || exit 1
+    insmsg "Done!"
+fi
+
+
+# Get groups
+jq '[.[].group] | unique' "$_ARCHIVE"
+# Filter for group
+jq "with_entries(.value |= (. | select(.group==\"$_group\"))) | del(.[] | nulls) | keys[] as \$k | \"\(\$k) (\(.[\$k].size))\"" "$_ARCHIVE"
+
