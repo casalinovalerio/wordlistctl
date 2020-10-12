@@ -17,7 +17,6 @@ GPLv3, this is a derived work from the Black Arch team, more specifically,
 as stated in the main document, from sepehrdad@blackarch.org
 ====> https://github.com/BlackArch/wordlistctl
 */
-
 package main
 
 import (
@@ -215,19 +214,26 @@ func downloadFile(url string, filepath string) error {
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
-// Decompress tar archive .tar.gz
-// https://stackoverflow.com/a/30813114
-func decompress(targetdir string, reader io.ReadCloser) error {
+// Decompress gzip archive .tar.gz
+func decompress(targetdir string, archive string) error {
+	// Read from gzip file
+	reader, err := os.Open(archive)
+	if err != nil {
+		fmt.Println("error")
+	}
+	defer reader.Close()
+
+	// Decopress from gzip to tarball
 	gzReader, err := gzip.NewReader(reader)
 	if err != nil {
 		return err
 	}
 	defer gzReader.Close()
 
+	// Decompress from tarball to final
 	tarReader := tar.NewReader(gzReader)
 	for {
 		header, err := tarReader.Next()
@@ -237,15 +243,18 @@ func decompress(targetdir string, reader io.ReadCloser) error {
 			return err
 		}
 
+		// Create directory and setting the target
+		os.MkdirAll(targetdir, os.ModePerm)
 		target := path.Join(targetdir, header.Name)
+
 		switch header.Typeflag {
 		case tar.TypeDir:
 			err = os.MkdirAll(target, os.FileMode(header.Mode))
 			if err != nil {
 				return err
 			}
-
-			setAttrs(target, header)
+			os.Chmod(target, os.FileMode(header.Mode))
+			os.Chtimes(target, header.AccessTime, header.ModTime)
 			break
 
 		case tar.TypeReg:
@@ -259,7 +268,8 @@ func decompress(targetdir string, reader io.ReadCloser) error {
 			}
 			w.Close()
 
-			setAttrs(target, header)
+			os.Chmod(target, os.FileMode(header.Mode))
+			os.Chtimes(target, header.AccessTime, header.ModTime)
 			break
 
 		default:
@@ -270,18 +280,12 @@ func decompress(targetdir string, reader io.ReadCloser) error {
 	return nil
 }
 
-func setAttrs(target string, header *tar.Header) {
-	os.Chmod(target, os.FileMode(header.Mode))
-	os.Chtimes(target, header.AccessTime, header.ModTime)
-}
-
 func downloadAndExtract(url string, downloadPath string, finalPath string) {
+	fmt.Println("==> Downloading: \n", url)
 	downloadFile(url, downloadPath)
-	reader, err := os.Open(downloadPath)
-	if err != nil {
-		fmt.Println("error")
-	}
-	decompress(finalPath, reader)
+	fmt.Println("Done!\n==> Extracting to ", finalPath)
+	decompress(finalPath, downloadPath)
+	fmt.Println("It was smooth")
 }
 
 func printInfo(wordlist Wordlist) {
@@ -303,10 +307,9 @@ func searchRoutine(term string, wordlists []Wordlist) {
 func fetchOne(wordlistArray []Wordlist, name string, basedir string) {
 	wordlistMap := convertWordlistToMap(wordlistArray)
 	downloadPath := os.TempDir() + "/" + name + ".tar.gz"
-	finalPath := basedir + "/" + name
 	result, ok := wordlistMap[name]
 	if ok {
-		downloadAndExtract(result.URL, downloadPath, finalPath)
+		downloadAndExtract(result.URL, downloadPath, basedir+"/"+result.Group)
 	} else {
 		report("No wordlist found with that name")
 	}
@@ -315,7 +318,7 @@ func fetchOne(wordlistArray []Wordlist, name string, basedir string) {
 func fetchMulti(wordlistArray []Wordlist, group string, basedir string) {
 	for _, wordlist := range wordlistArray {
 		if wordlist.Info.Group == group {
-			downloadAndExtract(wordlist.Info.URL, os.TempDir()+"/"+wordlist.Name+"tar.gz", basedir+"/"+wordlist.Name)
+			downloadAndExtract(wordlist.Info.URL, os.TempDir()+"/"+wordlist.Name+"tar.gz", basedir+"/"+wordlist.Info.Group)
 		}
 	}
 }
