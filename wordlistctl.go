@@ -32,6 +32,11 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"text/tabwriter"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/h2non/filetype"
 )
 
 // flag global variables to usage and cli parsing
@@ -49,7 +54,7 @@ var (
 // Default locations of archive.json, which contains the data needed to this program to run
 var (
 	repoLocation = "/usr/share/wordlistctl/archive.json"
-	repoURL      = "https://wl.casalino.xyz/archive.json"
+	repoURL      = "https://raw.githubusercontent.com/casalinovalerio/wordlistctl/main/archive.json"
 )
 
 // WordlistInfo is made to wrap the JSON info in archive.json
@@ -136,6 +141,10 @@ func main() {
 		searchRoutine(os.Args[2], wordlistArray)
 	case "fetch":
 		fetch.Parse(os.Args[2:])
+		if !isWritable(*fetchBase) {
+			report("You don't have permissions to write in that dir")
+			os.Exit(2)
+		}
 		if *fetchName == DEFAULTSTR {
 			if *fetchGroup == DEFAULTSTR {
 				report("You should choose either a group or a name...")
@@ -166,6 +175,10 @@ func fileExist(filename string) bool {
 		return false
 	}
 	return !info.IsDir()
+}
+
+func isWritable(path string) bool {
+	return unix.Access(path, unix.W_OK) == nil
 }
 
 // Reads the repo file and returns an array with all the
@@ -217,65 +230,106 @@ func downloadFile(url string, filepath string) error {
 	return nil
 }
 
-// Decompress gzip archive .tar.gz
-func decompress(targetdir string, archive string) error {
-	// Read from gzip file
+// Decompress gzip archive
+func decompressGzip(targetdir string, archive string) string {
 	reader, err := os.Open(archive)
 	if err != nil {
 		fmt.Println("error")
 	}
 	defer reader.Close()
 
-	// Decopress from gzip to tarball
 	gzReader, err := gzip.NewReader(reader)
 	if err != nil {
-		return err
+		return ""
 	}
 	defer gzReader.Close()
 
+	target, err := os.Create(path.Join(targetdir, gzReader.Name))
+	if err != nil {
+		return ""
+	}
+
+	if _, err := io.Copy(target, gzReader); err != nil {
+		return ""
+	}
+
+	if os.Remove(archive) != nil {
+		report("It was impossible to clean")
+	}
+
+	return target.Name()
+}
+
+func decompressTar(targetdir string, archive string) string {
+	reader, err := os.Open(archive)
+	if err != nil {
+		fmt.Println("error")
+	}
+	defer reader.Close()
+
 	// Decompress from tarball to final
-	tarReader := tar.NewReader(gzReader)
+	tarReader := tar.NewReader(reader)
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return err
+			return ""
 		}
-
-		// Create directory and setting the target
-		os.MkdirAll(targetdir, os.ModePerm)
 		target := path.Join(targetdir, header.Name)
 
 		switch header.Typeflag {
 		case tar.TypeDir:
 			err = os.MkdirAll(target, os.FileMode(header.Mode))
 			if err != nil {
-				return err
+				return ""
 			}
 			os.Chmod(target, os.FileMode(header.Mode))
 			os.Chtimes(target, header.AccessTime, header.ModTime)
 			break
-
 		case tar.TypeReg:
 			w, err := os.Create(target)
 			if err != nil {
-				return err
+				return ""
 			}
 			_, err = io.Copy(w, tarReader)
 			if err != nil {
-				return err
+				return ""
 			}
 			w.Close()
-
 			os.Chmod(target, os.FileMode(header.Mode))
 			os.Chtimes(target, header.AccessTime, header.ModTime)
-			break
+			return target
 
 		default:
 			log.Printf("unsupported type: %v", header.Typeflag)
 			break
 		}
+	}
+	return ""
+}
+
+// To move files no matter of the partitions
+func moveFile(sourcePath, destPath string) error {
+	inputFile, err := os.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("Couldn't open source file: %s", err)
+	}
+	outputFile, err := os.Create(destPath)
+	if err != nil {
+		inputFile.Close()
+		return fmt.Errorf("Couldn't open dest file: %s", err)
+	}
+	defer outputFile.Close()
+	_, err = io.Copy(outputFile, inputFile)
+	inputFile.Close()
+	if err != nil {
+		return fmt.Errorf("Writing to output file failed: %s", err)
+	}
+	// The copy was successful, so now delete the original file
+	err = os.Remove(sourcePath)
+	if err != nil {
+		return fmt.Errorf("Failed removing original file: %s", err)
 	}
 	return nil
 }
@@ -283,13 +337,50 @@ func decompress(targetdir string, archive string) error {
 func downloadAndExtract(url string, downloadPath string, finalPath string) {
 	fmt.Println("==> Downloading: \n", url)
 	downloadFile(url, downloadPath)
-	fmt.Println("Done!\n==> Extracting to ", finalPath)
-	decompress(finalPath, downloadPath)
-	fmt.Println("It was smooth")
+	fmt.Println("Done!")
+
+	// Creating folder (group)
+	os.Mkdir(finalPath, os.ModePerm)
+
+	buf, _ := ioutil.ReadFile(downloadPath)
+
+	if filetype.IsType(buf, filetype.Types["gz"]) {
+		fmt.Println("==> Extracting...")
+		intermediate := decompressGzip(os.TempDir(), downloadPath)
+		buf, _ := ioutil.ReadFile(intermediate)
+		if filetype.IsType(buf, filetype.Types["tar"]) {
+			final := decompressTar(finalPath, intermediate)
+			if os.Remove(intermediate) != nil {
+				report("It was impossible to clean")
+			}
+			if final != finalPath {
+				report("final and finalPath are not the same")
+			}
+		} else {
+			err := moveFile(intermediate, path.Join(finalPath, path.Base(intermediate)))
+			if err != nil {
+				panic(err)
+			}
+		}
+	} else {
+		err := moveFile(downloadPath, path.Join(finalPath, path.Base(downloadPath)))
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	fmt.Println("Wordlist saved to ", finalPath, "\nIt was smooth, wasn't it?")
 }
 
 func printInfo(wordlist Wordlist) {
-	fmt.Println(wordlist.Name, " (", wordlist.Info.Size, ") [", wordlist.Info.Updated, "] ")
+	w := new(tabwriter.Writer)
+
+	// minwidth, tabwidth, padding, padchar, flags
+	w.Init(os.Stdout, 35, 8, 0, '\t', 0)
+
+	defer w.Flush()
+
+	fmt.Fprintf(w, ">"+wordlist.Name+"\t("+wordlist.Info.Size+")\t["+wordlist.Info.Updated+"]\n")
 }
 
 func searchRoutine(term string, wordlists []Wordlist) {
@@ -306,10 +397,9 @@ func searchRoutine(term string, wordlists []Wordlist) {
 
 func fetchOne(wordlistArray []Wordlist, name string, basedir string) {
 	wordlistMap := convertWordlistToMap(wordlistArray)
-	downloadPath := os.TempDir() + "/" + name + ".tar.gz"
 	result, ok := wordlistMap[name]
 	if ok {
-		downloadAndExtract(result.URL, downloadPath, basedir+"/"+result.Group)
+		downloadAndExtract(result.URL, path.Join(os.TempDir(), name), path.Join(basedir, result.Group))
 	} else {
 		report("No wordlist found with that name")
 	}
@@ -318,7 +408,7 @@ func fetchOne(wordlistArray []Wordlist, name string, basedir string) {
 func fetchMulti(wordlistArray []Wordlist, group string, basedir string) {
 	for _, wordlist := range wordlistArray {
 		if wordlist.Info.Group == group {
-			downloadAndExtract(wordlist.Info.URL, os.TempDir()+"/"+wordlist.Name+"tar.gz", basedir+"/"+wordlist.Info.Group)
+			downloadAndExtract(wordlist.Info.URL, path.Join(os.TempDir(), wordlist.Name), path.Join(basedir, wordlist.Info.Group))
 		}
 	}
 }
