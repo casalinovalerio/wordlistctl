@@ -23,7 +23,6 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -36,26 +35,43 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/alexflint/go-arg"
 	"github.com/h2non/filetype"
 )
 
-// flag global variables to usage and cli parsing
+// Default locations of archive.json, which contains the data needed to this program to run and other
+// important variables
 var (
-	DEFAULTSTR = "."
-	search     = flag.NewFlagSet("search", flag.ExitOnError)
-	fetch      = flag.NewFlagSet("fetch", flag.ExitOnError)
-	list       = flag.NewFlagSet("list", flag.ExitOnError)
-	listGroup  = list.String("g", DEFAULTSTR, "Specify a group to list: {usernames,passwords,discovery,fuzzing,misc}")
-	fetchGroup = fetch.String("g", DEFAULTSTR, "Specify a group to fetch: {usernames,passwords,discovery,fuzzing,misc}")
-	fetchBase  = fetch.String("b", "/usr/share/wordlists", "Base directory to store wordlists")
-	fetchName  = fetch.String("n", DEFAULTSTR, "The name of the desired wordlist to download")
-)
-
-// Default locations of archive.json, which contains the data needed to this program to run
-var (
+	version      = "v1.1-beta"
+	binaryName   = path.Base(os.Args[0])
 	repoLocation = "/usr/share/wordlistctl/archive.json"
 	repoURL      = "https://raw.githubusercontent.com/casalinovalerio/wordlistctl/main/archive.json"
 )
+
+// SearchCmd is a struct for search subcommand (go-arg)
+type SearchCmd struct {
+	Term string `arg:"positional" help:"Search term that will be parsed as regexp"`
+}
+
+// ListCmd is a struct for list subcommand (go-arg)
+type ListCmd struct {
+	Group string `arg:"-g,--group" help:"Specify a group to list: {usernames,passwords,discovery,fuzzing,misc}"`
+}
+
+// FetchCmd is a struct for fetch subcommand (go-arg)
+type FetchCmd struct {
+	Group string `arg:"-g,--group" help:"specify a group to fetch: {usernames,passwords,discovery,fuzzing,misc}"`
+	Base  string `arg:"-b,--base" help:"base directory to store wordlists" default:"/usr/share/wordlists/"`
+	Name  string `arg:"positional" help:"the name of the desired wordlist to download"`
+}
+
+// Var for main command (go-arg)
+var args struct {
+	Fetch   *FetchCmd  `arg:"subcommand:fetch" help:"fetch a wordlist"`
+	List    *ListCmd   `arg:"subcommand:list" help:"list the wordlists that are available"`
+	Search  *SearchCmd `arg:"subcommand:search" help:"search a particular wordlist"`
+	Version bool       `arg:"-v,--version" help:"display binary version"`
+}
 
 // WordlistInfo is made to wrap the JSON info in archive.json
 // which is made like so {"name":"...","info":{"url":"...","group":"..."...}
@@ -77,38 +93,16 @@ func report(msg string) {
 	fmt.Fprintln(os.Stderr, "[ERROR]: "+msg)
 }
 
-func searchUsage() {
-	fmt.Println("==> [SEARCH USAGE]: wordlistctl search 'search-term'")
-	search.PrintDefaults()
-}
-
-func fetchUsage() {
-	fmt.Println("==> [FETCH USAGE]: wordlistctl fetch -[bgn] [ARGS]")
-	fetch.PrintDefaults()
-}
-
-func listUsage() {
-	fmt.Println("==> [LIST USAGE]: wordlistctl list -g [ARGS]")
-	list.PrintDefaults()
-}
-
-func usage() {
-	fmt.Printf("[USAGE]: wordlistctl {search,list,fetch} -[hgb] [ARGS]\n\n")
-	searchUsage()
-	fmt.Printf("\n")
-	listUsage()
-	fmt.Printf("\n")
-	fetchUsage()
-	os.Exit(1)
-}
-
 func main() {
 
-	flag.Usage = usage
-	search.Usage = searchUsage
-	fetch.Usage = fetchUsage
-	list.Usage = listUsage
-	flag.Parse()
+	// Terminate if no subcommand is specified
+	if p := arg.MustParse(&args); p.Subcommand() == nil {
+		if args.Version {
+			fmt.Printf("(%s) Version: %s\n", binaryName, version)
+			os.Exit(0)
+		}
+		p.Fail("Missing subcommand")
+	}
 
 	// If file doesn't exist just re-download it
 	if !fileExist(repoLocation) {
@@ -117,52 +111,37 @@ func main() {
 		os.Exit(2)
 	}
 
-	if flag.NArg() < 1 {
-		report("Expected at least a command")
-		usage()
-	}
-
-	// Making this check before we load the wordlist archive into memory
-	if os.Args[1] != "search" && os.Args[1] != "list" && os.Args[1] != "fetch" {
-		report("Please input a valid mode")
-		usage()
-	}
-
 	// Preloading the wordlists
 	wordlistArray := getAllWordlists(repoLocation)
 
-	switch os.Args[1] {
-	case "search":
-		if len(os.Args) != 3 {
-			report("Provide search term")
-			searchUsage()
-			os.Exit(1)
+	switch {
+	case args.Search != nil:
+		if args.Search.Term == "" {
+			report("No search term provided")
+			os.Exit(2)
+		} else {
+			searchRoutine(args.Search.Term, wordlistArray)
 		}
-		searchRoutine(os.Args[2], wordlistArray)
-	case "fetch":
-		fetch.Parse(os.Args[2:])
-		if !isWritable(*fetchBase) {
+	case args.List != nil:
+		listRoutine(wordlistArray, args.List.Group)
+	case args.Fetch != nil:
+		if !isWritable(args.Fetch.Base) {
 			report("You don't have permissions to write in that dir")
 			os.Exit(2)
 		}
-		if *fetchName == DEFAULTSTR {
-			if *fetchGroup == DEFAULTSTR {
+		if args.Fetch.Name == "" {
+			if args.Fetch.Group == "" {
 				report("You should choose either a group or a name...")
 				os.Exit(2)
 			}
-			fetchMulti(wordlistArray, *fetchGroup, *fetchBase)
+			fetchMulti(wordlistArray, args.Fetch.Group, args.Fetch.Base)
 		} else {
-			if *fetchGroup != DEFAULTSTR {
+			if args.Fetch.Group != "" {
 				report("You shouldn't choose bot a group and a name...")
 				os.Exit(2)
 			}
-			fetchOne(wordlistArray, *fetchName, *fetchBase)
+			fetchOne(wordlistArray, args.Fetch.Name, args.Fetch.Base)
 		}
-	case "list":
-		list.Parse(os.Args[2:])
-		listRoutine(wordlistArray, *listGroup)
-	default:
-		// I'm unreachable
 	}
 }
 
@@ -177,6 +156,8 @@ func fileExist(filename string) bool {
 	return !info.IsDir()
 }
 
+// Checker to see if we have the right permission to write
+// in the folder we want to write
 func isWritable(path string) bool {
 	return unix.Access(path, unix.W_OK) == nil
 }
@@ -377,9 +358,7 @@ func printInfo(wordlist Wordlist) {
 
 	// minwidth, tabwidth, padding, padchar, flags
 	w.Init(os.Stdout, 35, 8, 0, '\t', 0)
-
 	defer w.Flush()
-
 	fmt.Fprintf(w, ">"+wordlist.Name+"\t("+wordlist.Info.Size+")\t["+wordlist.Info.Updated+"]\n")
 }
 
@@ -415,7 +394,7 @@ func fetchMulti(wordlistArray []Wordlist, group string, basedir string) {
 
 func listRoutine(wordlistArray []Wordlist, group string) {
 	for _, wordlist := range wordlistArray {
-		if group == wordlist.Info.Group || group == DEFAULTSTR {
+		if group == wordlist.Info.Group || group == "" {
 			printInfo(wordlist)
 		}
 	}
