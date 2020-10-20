@@ -11,7 +11,7 @@ offering wordlists with more than 6300 wordlists available.
 On Debian-based distros, add my ppa:
 
 ```bash
-curl -s --compressed "https://ppa.casalino.xyz/KEY.gpg" | sudo apt-key add -
+curl -s --compressed "https://ppa.casali.no/KEY.gpg" | sudo apt-key add -
 sudo curl -s --compressed -o /etc/apt/sources.list.d/my_list_file.list "https://ppa.casalino.xyz/my_list_file.list"
 sudo apt update
 sudo apt install wordlistctl
